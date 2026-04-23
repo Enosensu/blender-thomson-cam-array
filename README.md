@@ -1,2 +1,46 @@
-# blender-thomson-cam-array
-📸 A professional Blender plugin for generating perfectly uniform multi-angle camera rigs using a physical repulsion (Thomson Problem) solver. Optimized for character turnarounds and 2D painting practice. Developed with Gemini AI assistance.
+# Multi-Angle Camera Array for Blender
+
+**Multi-Angle Camera Array** 是一款专为 Blender 打造的多角度摄像机阵列插件。它旨在通过先进的几何分布算法，为 2D 动画制作、多角度绘画练习（Character Turnaround）以及模型展示提供一套自动化、精准的视角渲染解决方案。
+
+## ✨ 核心特性
+
+  - **一键阵列生成**：快速在目标物体周围创建多角度摄像机组。
+  - **Thomson Repulsion Solver (汤姆孙算法)**：不同于传统的斐波那契分布，本插件使用物理斥力模拟算法计算势能最低态，确保在任意摄像机数量（N）下都能实现球面的**绝对均匀分布**。
+  - **独立控制层级**：每个摄像机拥有独立的父级空物体节点（Pivot），且所有节点自动对齐总父级物体坐标，支持后期灵活调整。
+  - **标准视角集成**：一键包含前后左右上下六个正交基准视角。
+  - **时间轴标记绑定**：一键将所有摄像机按顺序绑定至时间轴标记（Markers），大幅优化批量渲染流程。
+  - **幂等性清理**：智能识别并清理旧的阵列数据与标记，防止场景冗余。
+
+## 🚀 安装方法
+
+1.  下载本仓库的 `multi_cam_rig.py` 文件。
+2.  打开 Blender，前往 `Edit > Preferences > Add-ons`。
+3.  点击 `Install...`，选择下载的文件。
+4.  勾选 **Camera: Multi-Angle Camera Array** 启用插件。
+
+## 🛠 使用说明
+
+1.  在 3D 视图侧边栏（快捷键 `N`）中找到 **MultiCam** 面板。
+2.  **核心设置**：在 `总父级物体 (Master)` 中选择你的角色或目标模型（或空物体）。
+3.  **分布策略**：
+      - 勾选 `包含6个标准正视角` 以获取基础方位。
+      - 在 `额外摄像机数量` 中输入你需要的均匀分布视角总数。
+4.  点击 **生成 / 更新阵列**。
+5.  在下方设置 `标记间隔`，点击 **绑定标记**，即可在时间轴看到按序排列的视角标记。
+
+## 🔬 技术细节
+
+本插件的算法层实现了 **Thomson Problem (汤姆孙问题)** 的数值模拟。
+
+> **原理**：将每个摄像机视为带同种电荷的粒子，受限于球面。通过模拟电子间的库仑斥力（$F \propto 1/r^2$），系统会自发演化至势能最低态。对于 $N=8$ 等特殊数量，算法会自动生成比正方体更均匀的“正四角反棱柱”结构。
+
+## 🤝 开发贡献
+
+本项目遵循 **SOLID** 编码原则开发，具有良好的模块化结构。
+
+  - **AI 辅助开发**：本项目深度利用 **Gemini 3.1 Pro** 提供的架构设计与算法优化建议。
+  - **架构建议**：欢迎通过 Issue 或 Pull Request 提交关于几何算法或工作流改进的建议。
+
+## 📄 开源许可
+
+本项目采用 [MIT License](https://www.google.com/search?q=LICENSE) 开源许可。
