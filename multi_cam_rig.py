@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Multi-Angle Camera Array",
     "author": "Architecture Dev",
-    "version": (1, 5, 2),
+    "version": (1, 5, 3),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > MultiCam",
-    "description": "Stable v1.5.1 architecture with pure Thomson Problem repulsion for N>2.",
+    "description": "Stable v1.5.2 architecture + pure Thomson repulsion + Focal Length control.",
     "category": "Camera",
 }
 
@@ -19,6 +19,7 @@ from mathutils import Vector
 class MathService:
     @staticmethod
     def get_standard_vectors() -> list[Vector]:
+        """获取标准的六个轴向正视角"""
         return [
             Vector((0, -1, 0)),  # Front
             Vector((0, 1, 0)),   # Back
@@ -46,7 +47,7 @@ class MathService:
     def get_platonic_vectors(samples: int) -> list[Vector]:
         """
         获取特定几何体的解析解。
-        回归至 1.5.1 架构，但移除了所有冗余的人类直觉硬编码。
+        基于 1.5.2 架构，移除了所有冗余的人类直觉硬编码。
         仅保留 N=2 作为世界坐标的物理对齐基准，其余全部交由动态演算。
         """
         if samples == 2:
@@ -56,7 +57,7 @@ class MathService:
     @staticmethod
     def get_repulsion_even_vectors(samples: int, iterations: int = 500) -> list[Vector]:
         """
-        纯动态计算算法 (基于 v1.5.1 基线):
+        纯动态计算算法 (基于 v1.5.2 基线):
         除 N=2 外，全部使用 Thomson 静电斥力模型计算最优解，避免陷入局部最优陷阱。
         """
         if samples == 0: return []
@@ -155,6 +156,7 @@ class RigService:
             return
 
         for i, vec in enumerate(vectors):
+            # --- 创建独立的空物体节点 ---
             empty_name = f"{cls.NODE_PREFIX}{master_obj.name}_{i:03d}"
             node_empty = bpy.data.objects.new(empty_name, None)
             node_empty.empty_display_type = 'SPHERE'
@@ -164,13 +166,19 @@ class RigService:
             node_empty.location = (0, 0, 0) 
             context.collection.objects.link(node_empty)
 
+            # --- 创建对应的摄像机并应用焦距 ---
             cam_data = bpy.data.cameras.new(name=f"CamData_{master_obj.name}_{i:03d}")
+            
+            # 【新增逻辑】：统一赋予用户在 UI 面板设置的焦距参数
+            cam_data.lens = props.focal_length 
+            
             cam_obj = bpy.data.objects.new(name=f"RigCam_{master_obj.name}_{i:03d}", object_data=cam_data)
             
             cam_obj.parent = node_empty
             cam_obj.location = vec.normalized() * props.distance
             context.collection.objects.link(cam_obj)
 
+            # --- 绑定约束 ---
             constraint = cam_obj.constraints.new(type='TRACK_TO')
             constraint.target = node_empty
             constraint.track_axis = 'TRACK_NEGATIVE_Z'
@@ -236,6 +244,15 @@ class MultiCamProperties(bpy.types.PropertyGroup):
         description="摄像机距离中心空物体的统一半径",
         default=5.0,
         min=0.1
+    )
+    
+    # 【新增逻辑】：避免报错，使用标准的 FloatProperty 控制焦距
+    focal_length: bpy.props.FloatProperty(
+        name="摄像机焦距 (mm)",
+        description="统一设置生成的摄像机的焦距大小",
+        default=50.0,
+        min=1.0,
+        max=500.0
     )
     
     include_standard: bpy.props.BoolProperty(
@@ -328,11 +345,14 @@ class MULTICAM_PT_main_panel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.multi_cam_props
 
+        # 核心设置控制区
         box = layout.box()
         box.label(text="核心设置:", icon='OBJECT_DATA')
         box.prop(props, "master_object")
         box.prop(props, "distance")
+        box.prop(props, "focal_length")  # 【新增逻辑】：将焦距设置暴露在 UI 上
 
+        # 视角分布控制区
         box = layout.box()
         box.label(text="分布策略:", icon='OUTLINER_OB_CAMERA')
         box.prop(props, "include_standard")
@@ -344,11 +364,13 @@ class MULTICAM_PT_main_panel(bpy.types.Panel):
             if props.distribution_mode == 'RANDOM':
                 col.prop(props, "random_seed")
 
+        # 生成按钮
         layout.separator()
         row = layout.row()
         row.scale_y = 1.5
         row.operator(MULTICAM_OT_generate.bl_idname, icon='FILE_REFRESH')
 
+        # 渲染辅助控制区
         layout.separator()
         box_render = layout.box()
         box_render.label(text="渲染辅助:", icon='RENDER_ANIMATION')
