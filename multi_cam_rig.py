@@ -1,16 +1,17 @@
 bl_info = {
     "name": "Multi-Angle Camera Array",
     "author": "Architecture Dev",
-    "version": (1, 6, 0),
+    "version": (1, 7, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > MultiCam",
-    "description": "Stable v1.5.2 architecture + pure Thomson repulsion + Focal Length & height-order control.",
+    "description": "Stable v1.5.2 architecture + pure Thomson repulsion + focal length & XYZ/smoothest camera ordering.",
     "category": "Camera",
 }
 
 import bpy
 import math
 import random
+import time
 from mathutils import Vector
 
 # ==========================================
@@ -100,60 +101,176 @@ class MathService:
             
         return vectors
 
+    # 可选顺序 → (排序轴, 是否沿该轴递减)
+    # 递减即从「轴正端」出发，例如 Z 递减 = 从上到下。
+    ORDER_AXES = {
+        'AXIS_X_POS': ('X', True),
+        'AXIS_X_NEG': ('X', False),
+        'AXIS_Y_POS': ('Y', True),
+        'AXIS_Y_NEG': ('Y', False),
+        'AXIS_Z_POS': ('Z', True),
+        'AXIS_Z_NEG': ('Z', False),
+    }
+
     @staticmethod
-    def sort_vectors_by_height(master_obj: bpy.types.Object, vectors: list[Vector], descending: bool) -> list[Vector]:
-        """
-        按世界坐标的 Z 高度重排方向向量（计入主物体的旋转）。
-
-        生成出来的摄像机编号本身就是「上 → 下」或「下 → 上」的顺序，
-        时间轴相邻标记的视角只会小幅变化，避免播放时镜头大幅度跳动。
-
-        Z 保持严格单调：任何高度差都会分层，绝不为缩短跳角而回退高度，
-        确保「从上到下」这一语义是准确可验证的。
-        同一水平高度（Z 相同，如前后左右四个赤道视角）内部再按方位角蛇形扫掠，
-        逐层升降时方位角来回摆动而非绕圈回头，避免赤道层出现 180° 跳变。
-        """
+    def _world_vectors(master_obj: bpy.types.Object, vectors: list[Vector]) -> list[Vector]:
+        """把方向向量转到世界空间（计入主物体旋转），零向量保持原样"""
         rot3 = master_obj.matrix_world.to_3x3()
+        result = []
+        for vec in vectors:
+            unit = vec.normalized()
+            world = rot3 @ unit
+            result.append(world if world.length > 1e-9 else unit)
+        return result
 
-        def azimuth(v: Vector) -> float:
-            w = rot3 @ v.normalized()
-            return math.atan2(w.y, w.x)
+    @staticmethod
+    def sort_vectors_by_axis(master_obj: bpy.types.Object, vectors: list[Vector],
+                             axis: str = 'Z', descending: bool = True) -> list[Vector]:
+        """
+        按世界坐标的任意轴重排方向向量（计入主物体旋转），Z 轴即「高度」。
+
+        生成出来的摄像机编号本身就是该轴上的单向序列，时间轴相邻标记的视角
+        只会小幅变化，避免播放时镜头大幅度跳动。
+
+        主键保持严格单调：任何差值都会分层，绝不为缩短跳角而回退，
+        确保「从 A 端到 B 端」这一语义是准确可验证的。
+        同一层（坐标相同，例如 Z 轴下的前后左右四个赤道视角）内部再按
+        垂直于该轴的平面内的方位角蛇形扫掠，逐层升降时方位角来回摆动而非
+        绕圈回头，避免该层出现 180° 跳变。
+        """
+        worlds = MathService._world_vectors(master_obj, vectors)
+        axis_idx = {'X': 0, 'Y': 1, 'Z': 2}.get(axis, 2)
+
+        # 垂直于排序轴的两个分量（按 X→Y→Z→X 循环取序，保证手性一致）
+        idx_u = (axis_idx + 1) % 3
+        idx_v = (axis_idx + 2) % 3
+
+        def comp(w: Vector, i: int) -> float:
+            return (w.x, w.y, w.z)[i]
+
+        def azimuth(w: Vector) -> float:
+            return math.atan2(comp(w, idx_v), comp(w, idx_u))
 
         def azimuth_gap(a: float, b: float) -> float:
             """两个方位角的最短夹角（处理 ±π 环绕）"""
             d = abs(a - b) % (2 * math.pi)
             return min(d, 2 * math.pi - d)
 
-        # 以 Z 为主键排序（sorted 稳定，同高度保持原生成顺序）
-        ordered = sorted(vectors, key=lambda v: (rot3 @ v.normalized()).z, reverse=descending)
+        # 以排序轴为主键（sorted 稳定，同层保持原生成顺序）
+        pairs = list(zip(vectors, worlds))
+        pairs.sort(key=lambda p: comp(p[1], axis_idx), reverse=descending)
 
         result: list[Vector] = []
-        layer: list[Vector] = []
-        layer_z = None
+        layer: list[tuple[Vector, Vector]] = []
+        layer_key = None
         last_az = None
 
         def flush_layer():
             nonlocal last_az
             if not layer:
                 return
-            by_az = sorted(layer, key=azimuth)
+            by_az = sorted(layer, key=lambda p: azimuth(p[1]))
             # 蛇形：选与上一层末尾方位角更接近的那一端作为本层起点
             if last_az is not None and \
-                    azimuth_gap(azimuth(by_az[0]), last_az) > azimuth_gap(azimuth(by_az[-1]), last_az):
+                    azimuth_gap(azimuth(by_az[0][1]), last_az) > azimuth_gap(azimuth(by_az[-1][1]), last_az):
                 by_az.reverse()
-            result.extend(by_az)
-            last_az = azimuth(by_az[-1])
+            result.extend(p[0] for p in by_az)
+            last_az = azimuth(by_az[-1][1])
             layer.clear()
 
-        for vec in ordered:
-            z = (rot3 @ vec.normalized()).z
-            if layer_z is not None and abs(z - layer_z) > 1e-6:
+        for vec, world in pairs:
+            key = comp(world, axis_idx)
+            if layer_key is not None and abs(key - layer_key) > 1e-6:
                 flush_layer()
-            layer.append(vec)
-            layer_z = z
+            layer.append((vec, world))
+            layer_key = key
 
         flush_layer()
         return result
+
+    @staticmethod
+    def sort_vectors_smoothest(master_obj: bpy.types.Object, vectors: list[Vector],
+                               time_budget: float = 1.0) -> list[Vector]:
+        """
+        最平滑模式：不追求单向排列，而是最小化相邻视角的球面角距离总和。
+
+        以「从上到下」的结果作为初始解（保证不劣于单向模式），再用
+        最近邻构造 + 2-opt 局部搜索改进；搜索有时间预算，视角数量很大时
+        也不会卡住 UI。
+        """
+        n = len(vectors)
+        if n <= 2:
+            return list(vectors)
+
+        unit = [v.normalized() for v in vectors]
+
+        def clamp(x: float) -> float:
+            return max(-1.0, min(1.0, x))
+
+        # 代价矩阵：1 - cos(夹角)，0 表示同向，严格随角距离单调递增
+        cost = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            ui = unit[i]
+            row_i = cost[i]
+            for j in range(i + 1, n):
+                d = 1.0 - clamp(ui.dot(unit[j]))
+                row_i[j] = d
+                cost[j][i] = d
+
+        def total(order: list[int]) -> float:
+            return sum(cost[order[i]][order[i + 1]] for i in range(len(order) - 1))
+
+        # --- 初始解 1：单向排序（Z 从上到下），保证单调模式的平滑度是下界 ---
+        seeded = MathService.sort_vectors_by_axis(master_obj, vectors, 'Z', descending=True)
+        index_of = {id(v): i for i, v in enumerate(vectors)}
+        order_seed = [index_of[id(v)] for v in seeded]
+
+        # --- 初始解 2：最近邻构造，起点取最高点（Z 最大） ---
+        world_z = [(w.z) for w in MathService._world_vectors(master_obj, vectors)]
+        start = max(range(n), key=lambda i: world_z[i])
+        unvisited = set(range(n))
+        order_nn = [start]
+        unvisited.remove(start)
+        cur = start
+        while unvisited:
+            nxt = min(unvisited, key=lambda j: cost[cur][j])
+            order_nn.append(nxt)
+            unvisited.remove(nxt)
+            cur = nxt
+
+        best = order_seed if total(order_seed) <= total(order_nn) else order_nn
+        best_cost = total(best)
+
+        # --- 2-opt 局部搜索（first improvement，受时间预算约束）---
+        # 反转区间 [i..j] 后，边 (i-1,i) 与 (j,j+1) 换成 (i-1,j) 与 (i,j+1)
+        deadline = time.time() + time_budget
+        improved = True
+        while improved and time.time() < deadline:
+            improved = False
+            for i in range(n - 1):
+                if time.time() >= deadline:
+                    break
+                a_prev = best[i - 1] if i > 0 else None
+                a = best[i]
+                for j in range(i + 2, n):
+                    b = best[j]
+                    b_next = best[j + 1] if j + 1 < n else None
+
+                    delta = 0.0
+                    if a_prev is not None:
+                        delta += cost[a_prev][b] - cost[a_prev][a]
+                    if b_next is not None:
+                        delta += cost[a][b_next] - cost[b][b_next]
+
+                    if delta < -1e-9:
+                        best[i:j + 1] = reversed(best[i:j + 1])
+                        best_cost += delta
+                        improved = True
+                        break
+                if improved:
+                    break
+
+        return [vectors[i] for i in best]
 
     @staticmethod
     def get_random_sphere_vectors(samples: int, seed: int) -> list[Vector]:
@@ -210,11 +327,12 @@ class RigService:
         if not vectors:
             return
 
-        # --- 可选的按高度重排（生成顺序 / 上→下 / 下→上）---
-        if props.camera_order != 'GENERATION':
-            vectors = MathService.sort_vectors_by_height(
-                master_obj, vectors, descending=(props.camera_order == 'TOP_DOWN')
-            )
+        # --- 可选的排列顺序（生成顺序 / XYZ 六向 / 最平滑）---
+        if props.camera_order == 'SMOOTHEST':
+            vectors = MathService.sort_vectors_smoothest(master_obj, vectors)
+        elif props.camera_order in MathService.ORDER_AXES:
+            axis, descending = MathService.ORDER_AXES[props.camera_order]
+            vectors = MathService.sort_vectors_by_axis(master_obj, vectors, axis, descending)
 
         for i, vec in enumerate(vectors):
             # --- 创建独立的空物体节点 ---
@@ -361,8 +479,13 @@ class MultiCamProperties(bpy.types.PropertyGroup):
         description="决定摄像机编号与时间轴标记的排列方式，避免播放时视角大幅度跳动",
         items=[
             ('GENERATION', "生成顺序", "按算法生成的原始顺序排列（旧行为）"),
-            ('TOP_DOWN', "从上到下 (Z 降序)", "按世界坐标 Z 高度从高到低排列，镜头沿垂直方向平滑过渡"),
-            ('BOTTOM_UP', "从下到上 (Z 升序)", "按世界坐标 Z 高度从低到高排列"),
+            ('AXIS_Z_POS', "从上到下 (Z+)", "按世界 Z 从高到低排列，镜头沿垂直方向自上而下过渡"),
+            ('AXIS_Z_NEG', "从下到上 (Z−)", "按世界 Z 从低到高排列"),
+            ('AXIS_Y_POS', "从前到后 (Y+)", "按世界 Y 从前往后排列（Blender 中 −Y 为默认正面）"),
+            ('AXIS_Y_NEG', "从后到前 (Y−)", "按世界 Y 从后往前排列"),
+            ('AXIS_X_POS', "从右到左 (X+)", "按世界 X 从右到左排列"),
+            ('AXIS_X_NEG', "从左到右 (X−)", "按世界 X 从左到右排列"),
+            ('SMOOTHEST', "最平滑 (最短路径)", "不保证单向，以最小化相邻视角夹角总和为目标，时间轴播放最顺滑"),
         ],
         default='GENERATION'
     )
@@ -438,13 +561,18 @@ class MULTICAM_PT_main_panel(bpy.types.Panel):
             if props.distribution_mode == 'RANDOM':
                 col.prop(props, "random_seed")
 
-        # 【新增逻辑】：排列顺序（按 Z 高度排序，减少时间轴播放时的视角跳动）
+        # 排列顺序（按空间轴单向排列，或最平滑模式，减少时间轴播放时的视角跳动）
         box_order = layout.box()
         box_order.label(text="排列顺序:", icon='SORT_DESC')
         box_order.prop(props, "camera_order")
-        if props.camera_order != 'GENERATION':
+        if props.camera_order == 'SMOOTHEST':
             note = box_order.column(align=True)
-            note.label(text="相邻标记沿垂直方向连续过渡", icon='INFO')
+            note.label(text="最小化相邻视角夹角总和", icon='INFO')
+            note.label(text="不保证单向，播放最顺滑")
+            note.label(text="需重新点击「生成」以刷新编号")
+        elif props.camera_order != 'GENERATION':
+            note = box_order.column(align=True)
+            note.label(text="相邻标记沿该轴连续过渡", icon='INFO')
             note.label(text="需重新点击「生成」以刷新编号")
 
         # 生成按钮
