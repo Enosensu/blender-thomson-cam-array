@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Multi-Angle Camera Array",
     "author": "Architecture Dev",
-    "version": (1, 5, 3),
+    "version": (1, 6, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > MultiCam",
-    "description": "Stable v1.5.2 architecture + pure Thomson repulsion + Focal Length control.",
+    "description": "Stable v1.5.2 architecture + pure Thomson repulsion + Focal Length & height-order control.",
     "category": "Camera",
 }
 
@@ -101,6 +101,61 @@ class MathService:
         return vectors
 
     @staticmethod
+    def sort_vectors_by_height(master_obj: bpy.types.Object, vectors: list[Vector], descending: bool) -> list[Vector]:
+        """
+        按世界坐标的 Z 高度重排方向向量（计入主物体的旋转）。
+
+        生成出来的摄像机编号本身就是「上 → 下」或「下 → 上」的顺序，
+        时间轴相邻标记的视角只会小幅变化，避免播放时镜头大幅度跳动。
+
+        Z 保持严格单调：任何高度差都会分层，绝不为缩短跳角而回退高度，
+        确保「从上到下」这一语义是准确可验证的。
+        同一水平高度（Z 相同，如前后左右四个赤道视角）内部再按方位角蛇形扫掠，
+        逐层升降时方位角来回摆动而非绕圈回头，避免赤道层出现 180° 跳变。
+        """
+        rot3 = master_obj.matrix_world.to_3x3()
+
+        def azimuth(v: Vector) -> float:
+            w = rot3 @ v.normalized()
+            return math.atan2(w.y, w.x)
+
+        def azimuth_gap(a: float, b: float) -> float:
+            """两个方位角的最短夹角（处理 ±π 环绕）"""
+            d = abs(a - b) % (2 * math.pi)
+            return min(d, 2 * math.pi - d)
+
+        # 以 Z 为主键排序（sorted 稳定，同高度保持原生成顺序）
+        ordered = sorted(vectors, key=lambda v: (rot3 @ v.normalized()).z, reverse=descending)
+
+        result: list[Vector] = []
+        layer: list[Vector] = []
+        layer_z = None
+        last_az = None
+
+        def flush_layer():
+            nonlocal last_az
+            if not layer:
+                return
+            by_az = sorted(layer, key=azimuth)
+            # 蛇形：选与上一层末尾方位角更接近的那一端作为本层起点
+            if last_az is not None and \
+                    azimuth_gap(azimuth(by_az[0]), last_az) > azimuth_gap(azimuth(by_az[-1]), last_az):
+                by_az.reverse()
+            result.extend(by_az)
+            last_az = azimuth(by_az[-1])
+            layer.clear()
+
+        for vec in ordered:
+            z = (rot3 @ vec.normalized()).z
+            if layer_z is not None and abs(z - layer_z) > 1e-6:
+                flush_layer()
+            layer.append(vec)
+            layer_z = z
+
+        flush_layer()
+        return result
+
+    @staticmethod
     def get_random_sphere_vectors(samples: int, seed: int) -> list[Vector]:
         vectors = []
         rng = random.Random(seed)
@@ -155,6 +210,12 @@ class RigService:
         if not vectors:
             return
 
+        # --- 可选的按高度重排（生成顺序 / 上→下 / 下→上）---
+        if props.camera_order != 'GENERATION':
+            vectors = MathService.sort_vectors_by_height(
+                master_obj, vectors, descending=(props.camera_order == 'TOP_DOWN')
+            )
+
         for i, vec in enumerate(vectors):
             # --- 创建独立的空物体节点 ---
             empty_name = f"{cls.NODE_PREFIX}{master_obj.name}_{i:03d}"
@@ -204,6 +265,8 @@ class RigService:
         if not rig_cameras:
             return 0
 
+        # 按名称排序：名称尾部的序号即生成时确定的排列顺序
+        # （选择「从上到下 / 从下到上」时，build_rig 已按高度写入了编号，这里直接沿用）
         rig_cameras.sort(key=lambda c: c.name)
 
         # 防弹清理逻辑
@@ -293,6 +356,17 @@ class MultiCamProperties(bpy.types.PropertyGroup):
         max=500
     )
 
+    camera_order: bpy.props.EnumProperty(
+        name="摄像机排列顺序",
+        description="决定摄像机编号与时间轴标记的排列方式，避免播放时视角大幅度跳动",
+        items=[
+            ('GENERATION', "生成顺序", "按算法生成的原始顺序排列（旧行为）"),
+            ('TOP_DOWN', "从上到下 (Z 降序)", "按世界坐标 Z 高度从高到低排列，镜头沿垂直方向平滑过渡"),
+            ('BOTTOM_UP', "从下到上 (Z 升序)", "按世界坐标 Z 高度从低到高排列"),
+        ],
+        default='GENERATION'
+    )
+
 
 # ==========================================
 # 4. 表现层与控制器 (UI & Operators)
@@ -363,6 +437,15 @@ class MULTICAM_PT_main_panel(bpy.types.Panel):
             col.prop(props, "extra_cam_count")
             if props.distribution_mode == 'RANDOM':
                 col.prop(props, "random_seed")
+
+        # 【新增逻辑】：排列顺序（按 Z 高度排序，减少时间轴播放时的视角跳动）
+        box_order = layout.box()
+        box_order.label(text="排列顺序:", icon='SORT_DESC')
+        box_order.prop(props, "camera_order")
+        if props.camera_order != 'GENERATION':
+            note = box_order.column(align=True)
+            note.label(text="相邻标记沿垂直方向连续过渡", icon='INFO')
+            note.label(text="需重新点击「生成」以刷新编号")
 
         # 生成按钮
         layout.separator()
